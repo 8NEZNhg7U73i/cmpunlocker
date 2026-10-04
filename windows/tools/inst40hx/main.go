@@ -1,4 +1,4 @@
-// 40HX 一键安装工具 v2.0.1 (CMP 40HX Windows Unlock Installer)
+// 40HX 一键安装工具 v2.0.2 (CMP 40HX Windows Unlock Installer)
 // 功能:
 //
 //	(默认) 安装: GSP 启用(EnableGpuFirmware=1) + ESP 双路部署 40HXUNLK.EFI (V70)
@@ -137,6 +137,10 @@ func main() {
 				residentGuard()
 			}
 			return
+		case "-gen2dry":
+			// read-only PL0 dry run (see gen2_pl0_v2.go); needs admin to load the drivers
+			gen2DryRunMain()
+			return
 		case "-gspensure":
 			gspEnsureMain()
 			return
@@ -256,6 +260,8 @@ func setupLog(defName string) {
 		os.Stdout = f
 		os.Stderr = f
 		fmt.Fprintf(f, "==== 40HX tool %s ====\n", time.Now().Format("2006-01-02 15:04:05"))
+		// fsync every 100 ms so the last lines before a BSOD reach the disk
+		go logSyncLoop(f)
 	}
 }
 
@@ -327,6 +333,7 @@ func printHelp() {
 	fmt.Println(tr("CMP 40HX Windows Unlock Installer", "Установщик разблокировки CMP 40HX для Windows", "CMP 40HX Windows 解锁一键安装工具"))
 	fmt.Println(tr("  Usage: 40HXInstaller.exe            # install (administrator required)", "  Использование: 40HXInstaller.exe            # установка (нужны права администратора)", "  用法: 40HXInstaller.exe            # 安装(需管理员)"))
 	fmt.Println(tr("          40HXInstaller.exe -gen2      # run Gen2 unlock now", "          40HXInstaller.exe -gen2      # запустить разблокировку Gen2", "       40HXInstaller.exe -gen2      # 立即执行 Gen2 解锁"))
+	fmt.Println(tr("          40HXInstaller.exe -gen2dry   # read-only: show which PL0 bits would change (writes nothing)", "          40HXInstaller.exe -gen2dry   # только чтение: показать, какие биты PL0 изменились бы (ничего не пишет)", "       40HXInstaller.exe -gen2dry   # 只读: 显示 PL0 会改动哪些位(不写入)"))
 	fmt.Println(tr("          40HXInstaller.exe -uninstall # uninstall", "          40HXInstaller.exe -uninstall # удалить", "       40HXInstaller.exe -uninstall # 卸载"))
 	fmt.Println(tr("          40HXInstaller.exe -status    # show status", "          40HXInstaller.exe -status    # показать состояние", "       40HXInstaller.exe -status    # 状态"))
 	fmt.Println(tr("          40HXInstaller.exe -lang en|ru|zh # select language", "          40HXInstaller.exe -lang en|ru|zh # выбрать язык", "       40HXInstaller.exe -lang en|ru|zh # 选择语言"))
@@ -1447,46 +1454,22 @@ func gen2Main() {
 
 	// 1. PL0 writes (BAR0) — 经 ThrottleStop 物理内存写
 	fmt.Println(tr("[Gen2] Writing XVE/link registers (ThrottleStop)...", "[Gen2] Запись регистров XVE/канала (ThrottleStop)...", "[Gen2] 写 XVE/链路寄存器 (ThrottleStop)..."))
-	pl0 := []struct {
-		off  uint64
-		val  uint32
-		name string
-	}{
-		{0x8872C, 0x6, "XVE_OVR=6"},
-		{0x8C040, 0x80085800, "LINK_CONFIG_0"},
-		{0x8841C, 0xE0B42D00, "PRIV_MISC_1"},
-		{0x8C2C0, 0x068731B3, "CYA_0"},
-	}
 	bar0raw, _ := hxcore.PciRd(wh, gpuBDF, 0x10)
 	if bar0raw == 0 || bar0raw == 0xFFFFFFFF {
 		bar0raw = 0xF6000000
 	}
 	bar0Phys := uint64(bar0raw & 0xFFFFFFF0)
 	fmt.Printf("[Gen2] BAR0 = 0x%08X\n", bar0Phys)
-	// v2.6.0: BAR0 合法性校验 — 写 PL0 前确认 BAR0 真指向 40HX MMIO, 避免把 4 个
-	// 链路寄存器写到错误物理地址(多卡/寨板 BAR 重映射、BAR0 读回异常场景)。
-	// NV_PMC BOOT_0 @ BAR0+0x0: TU106 家族字节 = 0x16 (unlock40x_v70.c:2555 记 40HX=0x166000A1)。
-	// 家族不匹配或读回 0xFFFFFFFF → 中止 PL0 写入(宁可本次不开锁, 不污染他设备 MMIO)。
-	boot0, berr := hxcore.TSRead(th, bar0Phys+0x0)
-	if berr != nil || (boot0&0xFF000000) != 0x16000000 {
-		fmt.Printf(tr("[Gen2][!] BAR0 validity check failed: BOOT_0=0x%08X (expected TU10x family 0x16xxxxxx); aborting PL0 writes\n", "[Gen2][!] Проверка корректности BAR0 не пройдена: BOOT_0=0x%08X (ожидалось семейство TU10x 0x16xxxxxx); прерывание записи PL0\n", "[Gen2][!] BAR0 合法性校验失败: BOOT_0=0x%08X (期望 TU10x 家族 0x16xxxxxx), 中止 PL0 写入\n"), boot0)
-		gen2StatusFail(fmt.Sprintf(tr("BAR0 validation failed (BOOT_0=0x%08X); safely aborting PL0 writes; please send the logs", "Проверка BAR0 не пройдена (BOOT_0=0x%08X); безопасное прерывание записи PL0; пришлите журналы", "BAR0 校验失败(BOOT_0=0x%08X), 安全中止 PL0 写入; 请发日志"), boot0))
+	// v3.2.0 parity: the PL0 table lives in gen2_pl0_v2.go. gen2WritePL0V2 validates BAR0
+	// (plausible address + NV_PMC BOOT_0 family 0x16xxxxxx) on every call and writes nothing
+	// if the check fails -> abort here, same as the previous BOOT_0 failure path.
+	if !gen2WritePL0V2(th, bar0Phys) {
+		fmt.Println(tr("[Gen2][!] BAR0 validity check failed (see the BOOT_0 line above); aborting PL0 writes", "[Gen2][!] Проверка корректности BAR0 не пройдена (см. строку BOOT_0 выше); прерывание записи PL0", "[Gen2][!] BAR0 合法性校验失败(见上方 BOOT_0 行), 中止 PL0 写入"))
+		gen2StatusFail(tr("BAR0 validation failed (BOOT_0 mismatch); safely aborting PL0 writes; please send the logs", "Проверка BAR0 не пройдена (BOOT_0 не совпал); безопасное прерывание записи PL0; пришлите журналы", "BAR0 校验失败(BOOT_0 不符), 安全中止 PL0 写入; 请发日志"))
 		if !hasArg("-silent") {
 			gen2Notify(tr("BAR0 validation failed; Gen2 safely aborted.\nPlease send the logs.", "Проверка BAR0 не пройдена; Gen2 безопасно прервано.\nПришлите журналы.", "BAR0 校验失败, Gen2 安全中止。\n请发日志。"))
 		}
 		return
-	}
-	fmt.Printf(tr("[Gen2] BAR0 verified (BOOT_0=0x%08X, TU106)\n", "[Gen2] BAR0 проверен (BOOT_0=0x%08X, TU106)\n", "[Gen2] BAR0 校验通过 (BOOT_0=0x%08X, TU106)\n"), boot0)
-	for _, p := range pl0 {
-		if werr := hxcore.TSWrite(th, bar0Phys+p.off, p.val); werr != nil {
-			fmt.Printf(tr("  [!] %s write failed: %v\n", "  [!] %s: ошибка записи: %v\n", "  [!] %s 写失败: %v\n"), p.name, werr)
-			continue
-		}
-		if rb, rerr := hxcore.TSRead(th, bar0Phys+p.off); rerr != nil || rb != p.val {
-			fmt.Printf(tr("  [warn] %s read back 0x%08x (expected 0x%08x)\n", "  [warn] %s: обратное чтение 0x%08x (ожидалось 0x%08x)\n", "  [warn] %s 读回 0x%08x (期望 0x%08x)\n"), p.name, rb, p.val)
-		} else {
-			fmt.Printf("  %s OK (0x%08X)\n", p.name, rb)
-		}
 	}
 
 	// 2. LNKCTL2 TLS=2 (GPU + root)
@@ -1550,6 +1533,12 @@ func gen2Main() {
 		}
 	}
 
+	// v3.2.0 parity: Stage1 failed -> PnP fallback (disable/enable 40HX, reload nvlddmkm,
+	// redo PL0+TLS+retrain) BEFORE Stage2. Disable with: Gen2PnpFallback=0 (default 1).
+	if cur < 2 && hxcore.ConfigInt("Gen2PnpFallback", 1) != 0 {
+		cur = gen2PnpFallbackV2(&th, &wh, &gpuBDF, root)
+	}
+
 	// v2.6.0: 判据修正 — 驱动/ASPM 会在空闲时把链路降到 Gen1 省电, 只看当前
 	// 速率会把成功误报成失败(社区"Gen1"误报来源之一, v2.4.5 时代已实证:
 	// "待机省电时为 Gen1, 负载下自动跑满 Gen2")。以 GPU LNKCTL2 的
@@ -1576,7 +1565,7 @@ func gen2Main() {
 		if hasArg("-hard") {
 			fmt.Println(tr("[Gen2] retrain did not succeed → -hard explicitly triggers the Link Disable fallback", "[Gen2] переобучение не удалось → -hard явно запускает откат Link Disable", "[Gen2] retrain 未成 → -hard 显式触发 Link Disable 回退"))
 		} else {
-			fmt.Println(tr("[Gen2] retrain did not succeed → automatically running the Link Disable fallback (Gen2AutoHard is on by default; see README §2.5 to disable)", "[Gen2] переобучение не удалось → автоматический откат Link Disable (Gen2AutoHard включён по умолчанию; отключение см. в README §2.5)", "[Gen2] retrain 未成 → 自动执行 Link Disable 回退 (Gen2AutoHard 默认开; 关闭方法见 README §2.5)"))
+			fmt.Println(tr("[Gen2] retrain did not succeed → automatically running the Link Disable fallback (Gen2AutoHard=1 is set; see README to disable)", "[Gen2] переобучение не удалось → автоматический откат Link Disable (Gen2AutoHard=1 задан; отключение см. в README)", "[Gen2] retrain 未成 → 自动执行 Link Disable 回退 (已设置 Gen2AutoHard=1; 关闭方法见 README)"))
 		}
 		gen2HardFallback(&th, &wh, gpuBDF, bar0Phys, root)
 		return
@@ -1657,29 +1646,7 @@ func residentGuard() {
 //   Retrain-ONLY(不再二次 LD, 保驱动健康) → 重启 NVDisplay.ContainerLocalSystem。
 // 代码层无法判断"当前 Gen1 是空闲降速还是真训不上", 故 -hard 交给用户手动裁决。
 
-func gen2WritePL0(th syscall.Handle, bar0Phys uint64) {
-	pl0 := []struct {
-		off  uint64
-		val  uint32
-		name string
-	}{
-		{0x8872C, 0x6, "XVE_OVR=6"},
-		{0x8C040, 0x80085800, "LINK_CONFIG_0"},
-		{0x8841C, 0xE0B42D00, "PRIV_MISC_1"},
-		{0x8C2C0, 0x068731B3, "CYA_0"},
-	}
-	for _, p := range pl0 {
-		if werr := hxcore.TSWrite(th, bar0Phys+p.off, p.val); werr != nil {
-			fmt.Printf(tr("  [!] %s write failed: %v\n", "  [!] %s: ошибка записи: %v\n", "  [!] %s 写失败: %v\n"), p.name, werr)
-			continue
-		}
-		if rb, rerr := hxcore.TSRead(th, bar0Phys+p.off); rerr != nil || rb != p.val {
-			fmt.Printf(tr("  [warn] %s read back 0x%08x (expected 0x%08x)\n", "  [warn] %s: обратное чтение 0x%08x (ожидалось 0x%08x)\n", "  [warn] %s 读回 0x%08x (期望 0x%08x)\n"), p.name, rb, p.val)
-		} else {
-			fmt.Printf("  %s OK (0x%08X)\n", p.name, rb)
-		}
-	}
-}
+// gen2WritePL0 was replaced by gen2WritePL0V2 (gen2_pl0_v2.go).
 
 // 16-bit LNKCTL2 写 TLS(只读改写 bit3:0, 保留其余位)
 func gen2SetTLS(wh syscall.Handle, bdf uint32, tls uint16) {
@@ -1737,7 +1704,7 @@ func gen2RootLinkDisable(th syscall.Handle, wh *syscall.Handle, gpuBDF uint32, b
 	_ = hxcore.PciWr(*wh, root, cap+0x10, []byte{byte(set), byte(set >> 8)})
 	time.Sleep(500 * time.Millisecond)
 	// PL0 + TLS 在 link down 期间保持
-	gen2WritePL0(th, bar0Phys)
+	gen2WritePL0V2(th, bar0Phys)
 	gen2SetTLS(*wh, root, 2)
 	gen2SetTLS(*wh, gpuBDF, 2)
 	// clear bit4 → 重新训练
@@ -1813,7 +1780,7 @@ func gen2HardFallback(th, wh *syscall.Handle, gpuBDF uint32, bar0Phys uint64, ro
 	fmt.Printf("[Gen2 -hard] BAR0 = 0x%08X\n", bar0Phys)
 	didLD := false
 	// 1. re-assert PL0
-	gen2WritePL0(*th, bar0Phys)
+	gen2WritePL0V2(*th, bar0Phys)
 	// 2. Root Link Disable 循环
 	if root != 0xFFFFFFFF {
 		gen2RootLinkDisable(*th, wh, gpuBDF, bar0Phys, root)
@@ -1829,7 +1796,7 @@ func gen2HardFallback(th, wh *syscall.Handle, gpuBDF uint32, bar0Phys uint64, ro
 				fmt.Println(tr("[Gen2 -hard] retrain still failing → a second Link Disable cycle", "[Gen2 -hard] переобучение всё ещё не удаётся → второй цикл Link Disable", "[Gen2 -hard] retrain 仍失败 → 二次 Link Disable 循环"))
 				gen2RootLinkDisable(*th, wh, gpuBDF, bar0Phys, root)
 			}
-			gen2WritePL0(*th, bar0Phys)
+			gen2WritePL0V2(*th, bar0Phys)
 			gen2SetTLS(*wh, root, 2)
 			gen2SetTLS(*wh, gpuBDF, 2)
 			bdf := gpuBDF
@@ -1866,7 +1833,7 @@ func gen2HardFallback(th, wh *syscall.Handle, gpuBDF uint32, bar0Phys uint64, ro
 		if bar0raw, _ := hxcore.PciRd(*wh, gpuBDF, 0x10); bar0raw != 0 && bar0raw != 0xFFFFFFFF {
 			bar0Phys = uint64(bar0raw & 0xFFFFFFF0)
 		}
-		gen2WritePL0(*th, bar0Phys)
+		gen2WritePL0V2(*th, bar0Phys)
 		gen2SetTLS(*wh, root, 2)
 		gen2SetTLS(*wh, gpuBDF, 2)
 		for i := 0; i < 6; i++ {
@@ -1930,11 +1897,11 @@ func retryDepth() int {
 	return 0
 }
 
-// gen2AutoHardEnabled: Stage2(Link Disable + PnP 恢复)自动执行开关, 默认开。
-// 关闭: reg add HKLM\SOFTWARE\40HXUnlock /v Gen2AutoHard /t REG_DWORD /d 0 /f
-// (40HX 是唯一显示卡、不希望登录后链路瞬断数秒黑屏的用户可关)
+// gen2AutoHardEnabled: Stage2(Link Disable + PnP 恢复)自动执行开关, 默认关(与 3.2.0 一致)。
+// 开启: reg add HKLM\SOFTWARE\40HXUnlock /v Gen2AutoHard /t REG_DWORD /d 1 /f
+// (手动 -hard 不受此开关影响)
 func gen2AutoHardEnabled() bool {
-	return hxcore.ConfigInt("Gen2AutoHard", 1) != 0
+	return hxcore.ConfigInt("Gen2AutoHard", 0) != 0
 }
 
 // scheduleGen2Retry: 失败后安排一次性自动重试(SYSTEM, 静默, 默认 15 分钟后)。

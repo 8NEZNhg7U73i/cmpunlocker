@@ -89,3 +89,14 @@ utilities with the GUI subsystem, packages the embedded EFI and helper drivers,
 and writes `SHA256SUMS.txt` to `windows/release-fork/` (a build output, not
 tracked in git). `windows/tools/verify_source.ps1` checks that the expected
 source inputs are present and prints EFI hashes.
+
+## Gen2 PL0 parity with upstream v3.2.0 by PZH1gdmu (`tools/inst40hx/gen2_pl0_v2.go`)
+
+- PL0 register table now matches 3.2.0: new `PL_LINK_RATE` (0x8C1C0) write and
+  read-modify-write for `LINK_CONFIG_0` / `PL_LINK_RATE` (the fork previously wrote
+  `LINK_CONFIG_0` as the constant `0x80085800`).
+- BAR0 / BOOT_0 validation now runs on every PL0 write (including after Link Disable
+  and PnP), not only once at start.
+- `Gen2AutoHard` default changed from on to off (matches 3.2.0). Manual `-hard` is unchanged.
+- New PnP fallback between Stage 1 and Stage 2 (`Gen2PnpFallback`, default on).
+- New read-only `-gen2dry` mode and a 100 ms log fsync loop (`setupLog`).

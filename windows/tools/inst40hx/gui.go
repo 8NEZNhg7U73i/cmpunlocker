@@ -564,7 +564,7 @@ func (st *guiState) loadPolicyUI() {
 	for i, rb := range st.rbStrategy {
 		rb.SetChecked(i == strat)
 	}
-	st.ckAutoHard.SetChecked(hxcore.ConfigInt("Gen2AutoHard", 1) != 0)
+	st.ckAutoHard.SetChecked(hxcore.ConfigInt("Gen2AutoHard", 0) != 0)
 	cnt, interval := hxcore.Gen2RetryPolicy()
 	st.neRetryCnt.SetValue(float64(cnt))
 	st.neRetryMin.SetValue(float64(interval))

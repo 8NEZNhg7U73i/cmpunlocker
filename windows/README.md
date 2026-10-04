@@ -217,7 +217,11 @@ strategies are configurable in the GUI or through `HKLM\SOFTWARE\40HXUnlock`:
 | `DriverStrategy=0` | Load the helper only for the operation, then remove it. |
 | `DriverStrategy=1` | Retry failed Gen2 bring-up according to the retry settings. |
 | `DriverStrategy=2` | Keep the helper and let the login task monitor the link. |
-| `Gen2AutoHard=0` | Disable the Link Disable fallback. |
+| `Gen2AutoHard=1` | Automatically run the Link Disable fallback (Stage 2) when retrain fails. Default is `0` (off); a manual `-hard` run is unaffected. |
+| `Gen2PnpFallback=0` | Skip the PnP disable/enable fallback that runs between Stage 1 and Stage 2 (default `1`, on). |
+| `Gen2Pl0EfiRmw=1` | A/B only: use the EFI-unlock read-modify-write for PRIV_MISC_1 / CYA_0 instead of the 3.2.0 constants (default `0`). |
+| `Gen2WriteLtssmOvr=0` | Skip the XVE_OVR (0x8872C) write (default `1`). |
+| `Gen2WritePlLinkRate=0` | Skip the PL_LINK_RATE (0x8C1C0) write (default `1`). |
 | `Gen2RetryCount` | Number of automatic retries. |
 | `Gen2RetryIntervalMin` | Delay between retries in minutes. |
 
